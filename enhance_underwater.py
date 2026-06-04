@@ -4,46 +4,108 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
+import threading
 
 
 
-def enhance_underwater(img, red_boost, brightness, clip_limit):
+def white_balance(img):
+    try:
+        wb = cv2.xphoto.createSimpleWB()
+        return wb.balanceWhite(img)
+    except:
+        return img
+
+
+def dehaze_simple(img, strength):
+    if strength == 0:
+        return img
+
+    img = img.astype(np.float32)
+    kernel = np.ones((15, 15), np.uint8)
+    dark = cv2.erode(np.min(img, axis=2), kernel)
+
+    transmission = 1 - strength * (dark / 255.0)
+    transmission = np.clip(transmission, 0.2, 1)
+
+    result = np.empty_like(img)
+    for c in range(3):
+        result[:, :, c] = img[:, :, c] / transmission
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def stretch_channels(img):
+    result = np.zeros_like(img)
+    for i in range(3):
+        channel = img[:, :, i]
+        min_val = np.percentile(channel, 1)
+        max_val = np.percentile(channel, 99)
+        result[:, :, i] = np.clip(
+            (channel - min_val) * 255 / (max_val - min_val + 1e-6),
+            0, 255
+        )
+    return result.astype(np.uint8)
+
+
+def denoise(img, strength):
+    if strength == 0:
+        return img
+    return cv2.fastNlMeansDenoisingColored(
+        img, None,
+        h=10 * strength,
+        hColor=10 * strength,
+        templateWindowSize=7,
+        searchWindowSize=21
+    )
+
+
+def sharpen(img, strength):
+    if strength == 0:
+        return img
+    kernel = np.array([[0, -1, 0],
+                       [-1, 5 + strength, -1],
+                       [0, -1, 0]])
+    return cv2.filter2D(img, -1, kernel)
+
+
+def enhance_underwater(img, red_boost, brightness, clip_limit,
+                       dehaze_strength, sharp_strength, noise_strength):
+
+    if (red_boost == 1.0 and brightness == 1.0 and clip_limit == 0.0 and
+        dehaze_strength == 0.0 and sharp_strength == 0 and noise_strength == 0):
+        return img
+
+    img = white_balance(img)
+    img = dehaze_simple(img, dehaze_strength)
+
     img_float = img.astype(np.float32) / 255.0
 
-    
-    avg_r = np.mean(img_float[:, :, 2])
-    avg_g = np.mean(img_float[:, :, 1])
-    avg_b = np.mean(img_float[:, :, 0])
-    avg_gray = (avg_r + avg_g + avg_b) / 3
-
-    img_float[:, :, 2] *= (avg_gray / (avg_r + 1e-6))
-    img_float[:, :, 1] *= (avg_gray / (avg_g + 1e-6))
-    img_float[:, :, 0] *= (avg_gray / (avg_b + 1e-6))
-
-    
     img_float[:, :, 2] = np.clip(img_float[:, :, 2] * red_boost, 0, 1)
-
-    
     img_float = np.clip(img_float * brightness, 0, 1)
 
-    img_uint8 = (img_float * 255).astype(np.uint8)
+    img = (img_float * 255).astype(np.uint8)
 
-    
-    lab = cv2.cvtColor(img_uint8, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    if clip_limit > 0:
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        img = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-    l = clahe.apply(l)
+    img = stretch_channels(img)
+    img = denoise(img, noise_strength)
+    img = sharpen(img, sharp_strength)
 
-    lab = cv2.merge((l, a, b))
-    enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    return img
 
-    return enhanced
 
+
+update_job = None
+preview_original = None
 
 
 def load_preview():
-    global preview_img, preview_original
+    global preview_original
 
     file_path = filedialog.askopenfilename(
         filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")]
@@ -53,37 +115,71 @@ def load_preview():
 
     preview_original = cv2.imread(file_path)
 
+    red_slider.set(1.0)
+    bright_slider.set(1.0)
+    clahe_slider.set(0.0)
+    dehaze_slider.set(0.0)
+    sharp_slider.set(0)
+    noise_slider.set(0)
+
     update_preview()
 
 
-
 def update_preview(event=None):
+    global update_job
+
     if preview_original is None:
         return
 
-    red_val = red_slider.get()
-    bright_val = bright_slider.get()
-    clahe_val = clahe_slider.get()
+    if update_job is not None:
+        root.after_cancel(update_job)
 
-    enhanced = enhance_underwater(preview_original.copy(), red_val, bright_val, clahe_val)
+    update_job = root.after(120, start_preview_thread)
 
-    
-    display = cv2.resize(enhanced, (400, 300))
 
-    display = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+def start_preview_thread():
+    threading.Thread(target=render_preview, daemon=True).start()
+
+
+def render_preview():
+    if preview_original is None:
+        return
+
+    preview_small = cv2.resize(preview_original, (400, 300))
+
+    enhanced = enhance_underwater(
+        preview_small,
+        red_slider.get(),
+        bright_slider.get(),
+        clahe_slider.get(),
+        dehaze_slider.get(),
+        sharp_slider.get(),
+        noise_slider.get()
+    )
+
+    display = cv2.cvtColor(enhanced, cv2.COLOR_BGR2RGB)
     img_pil = Image.fromarray(display)
     img_tk = ImageTk.PhotoImage(img_pil)
 
+    
+    root.after(0, update_image_label, img_tk)
+
+
+def update_image_label(img_tk):
     preview_label.config(image=img_tk)
     preview_label.image = img_tk
 
 
 def process_folder():
+    threading.Thread(target=process_folder_worker, daemon=True).start()
+
+
+def process_folder_worker():
     input_folder = input_var.get()
     output_folder = output_var.get()
 
     if not input_folder or not output_folder:
-        messagebox.showerror("Error", "Please select folders")
+        root.after(0, lambda: messagebox.showerror("Error", "Select folders"))
         return
 
     os.makedirs(output_folder, exist_ok=True)
@@ -91,38 +187,33 @@ def process_folder():
     files = [f for f in os.listdir(input_folder)
              if f.lower().endswith((".jpg", ".png", ".jpeg", ".bmp"))]
 
-    if not files:
-        messagebox.showerror("Error", "No images found")
-        return
-
-    progress["maximum"] = len(files)
-
-    red_val = red_slider.get()
-    bright_val = bright_slider.get()
-    clahe_val = clahe_slider.get()
+    root.after(0, lambda: progress.config(maximum=len(files)))
 
     for i, file in enumerate(files, 1):
-        try:
-            input_path = os.path.join(input_folder, file)
-            output_path = os.path.join(output_folder, file)
+        img = cv2.imread(os.path.join(input_folder, file))
+        if img is None:
+            continue
 
-            img = cv2.imread(input_path)
-            if img is None:
-                continue
+        enhanced = enhance_underwater(
+            img,
+            red_slider.get(),
+            bright_slider.get(),
+            clahe_slider.get(),
+            dehaze_slider.get(),
+            sharp_slider.get(),
+            noise_slider.get()
+        )
 
-            enhanced = enhance_underwater(img, red_val, bright_val, clahe_val)
-            cv2.imwrite(output_path, enhanced)
+        cv2.imwrite(os.path.join(output_folder, file), enhanced)
 
-            progress["value"] = i
-            status_label.config(text=f"{i}/{len(files)} - {file}")
-            root.update_idletasks()
+        root.after(0, update_progress_ui, i, file, len(files))
 
-        except Exception as e:
-            print(f"Error processing {file}: {e}")
+    root.after(0, lambda: messagebox.showinfo("Done", "Processing complete!"))
 
-    messagebox.showinfo("Done", "Processing complete!")
-    status_label.config(text=" Complete")
 
+def update_progress_ui(i, file, total):
+    progress["value"] = i
+    status_label.config(text=f"{i}/{total} - {file}")
 
 
 def select_input():
@@ -133,28 +224,23 @@ def select_output():
     output_var.set(filedialog.askdirectory())
 
 
+
+
 root = tk.Tk()
-root.title("Underwater Enhancer")
-root.geometry("700x650")
+root.title("Underwater Enhancer (Threaded)")
+root.geometry("700x750")
 
 input_var = tk.StringVar()
 output_var = tk.StringVar()
 
-preview_original = None
-preview_img = None
-
-
 
 tk.Label(root, text="Input Folder").pack()
 tk.Entry(root, textvariable=input_var, width=60).pack()
-tk.Button(root, text="Browse Input", command=select_input).pack(pady=5)
-
+tk.Button(root, text="Browse Input", command=select_input).pack()
 
 tk.Label(root, text="Output Folder").pack()
 tk.Entry(root, textvariable=output_var, width=60).pack()
-tk.Button(root, text="Browse Output", command=select_output).pack(pady=5)
-
-
+tk.Button(root, text="Browse Output", command=select_output).pack()
 
 tk.Button(root, text="Load Preview Image", command=load_preview).pack(pady=10)
 
@@ -163,23 +249,51 @@ preview_label.pack()
 
 
 
-tk.Label(root, text="Red Boost (0.5–2.5)").pack()
-red_slider = tk.Scale(root, from_=0.5, to=2.5, resolution=0.1,
+
+slider_frame = tk.Frame(root)
+slider_frame.pack(pady=10)
+
+left_frame = tk.Frame(slider_frame)
+left_frame.grid(row=0, column=0, padx=20)
+
+right_frame = tk.Frame(slider_frame)
+right_frame.grid(row=0, column=1, padx=20)
+
+tk.Label(left_frame, text="Red Boost").pack()
+red_slider = tk.Scale(left_frame, from_=0.5, to=2.5, resolution=0.1,
                       orient="horizontal", command=update_preview)
-red_slider.set(1.2)
+red_slider.set(1.0)
 red_slider.pack()
 
-tk.Label(root, text="Brightness (0.5–2.0)").pack()
-bright_slider = tk.Scale(root, from_=0.5, to=2.0, resolution=0.1,
+tk.Label(left_frame, text="CLAHE Contrast").pack()
+clahe_slider = tk.Scale(left_frame, from_=0.0, to=6.0, resolution=0.5,
+                        orient="horizontal", command=update_preview)
+clahe_slider.set(0.0)
+clahe_slider.pack()
+
+tk.Label(left_frame, text="Sharpen Strength").pack()
+sharp_slider = tk.Scale(left_frame, from_=0, to=5, resolution=1,
+                        orient="horizontal", command=update_preview)
+sharp_slider.set(0)
+sharp_slider.pack()
+
+tk.Label(right_frame, text="Brightness").pack()
+bright_slider = tk.Scale(right_frame, from_=0.5, to=2.0, resolution=0.1,
                          orient="horizontal", command=update_preview)
 bright_slider.set(1.0)
 bright_slider.pack()
 
-tk.Label(root, text="Contrast (CLAHE 0.5–6.0)").pack()
-clahe_slider = tk.Scale(root, from_=0.5, to=6.0, resolution=0.5,
+tk.Label(right_frame, text="Dehaze Strength").pack()
+dehaze_slider = tk.Scale(right_frame, from_=0.0, to=1.0, resolution=0.1,
+                         orient="horizontal", command=update_preview)
+dehaze_slider.set(0.0)
+dehaze_slider.pack()
+
+tk.Label(right_frame, text="Noise Reduction").pack()
+noise_slider = tk.Scale(right_frame, from_=0, to=3, resolution=1,
                         orient="horizontal", command=update_preview)
-clahe_slider.set(2.0)
-clahe_slider.pack()
+noise_slider.set(0)
+noise_slider.pack()
 
 
 
@@ -189,16 +303,13 @@ progress.pack(pady=10)
 status_label = tk.Label(root, text="Idle")
 status_label.pack()
 
-
-
 tk.Button(root, text="Start",
           command=process_folder,
-          bg="green", fg="white").pack(pady=15)
-
+          bg="green", fg="white").pack(pady=10)
 
 tk.Button(root, text="Quit",
           command=root.destroy,
-          bg="red", fg="white").pack(pady=5)
+          bg="red", fg="white").pack()
 
 
 root.mainloop()
