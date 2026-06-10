@@ -7,7 +7,6 @@ from PIL import Image, ImageTk
 import threading
 
 
-
 def white_balance(img):
     try:
         wb = cv2.xphoto.createSimpleWB()
@@ -99,7 +98,6 @@ def enhance_underwater(img, red_boost, brightness, clip_limit,
     return img
 
 
-
 update_job = None
 preview_original = None
 
@@ -145,7 +143,7 @@ def render_preview():
     if preview_original is None:
         return
 
-    preview_small = cv2.resize(preview_original, (400, 300))
+    preview_small = cv2.resize(preview_original, (500, 400))
 
     enhanced = enhance_underwater(
         preview_small,
@@ -161,7 +159,6 @@ def render_preview():
     img_pil = Image.fromarray(display)
     img_tk = ImageTk.PhotoImage(img_pil)
 
-    
     root.after(0, update_image_label, img_tk)
 
 
@@ -217,37 +214,47 @@ def update_progress_ui(i, file, total):
 
 
 def select_input():
-    input_var.set(filedialog.askdirectory())
+    folder = filedialog.askdirectory()
+    if folder:
+        input_var.set(folder)
+        input_label.config(text=folder)
 
 
 def select_output():
-    output_var.set(filedialog.askdirectory())
-
+    folder = filedialog.askdirectory()
+    if folder:
+        output_var.set(folder)
+        output_label.config(text=folder)
 
 
 
 root = tk.Tk()
 root.title("Underwater Enhancer (Threaded)")
-root.geometry("700x750")
+root.geometry("700x900")
 
 input_var = tk.StringVar()
 output_var = tk.StringVar()
 
 
-tk.Label(root, text="Input Folder").pack()
-tk.Entry(root, textvariable=input_var, width=60).pack()
-tk.Button(root, text="Browse Input", command=select_input).pack()
+folder_frame = tk.Frame(root)
+folder_frame.pack(pady=10)
 
-tk.Label(root, text="Output Folder").pack()
-tk.Entry(root, textvariable=output_var, width=60).pack()
-tk.Button(root, text="Browse Output", command=select_output).pack()
+tk.Button(folder_frame, text=" Input", command=select_input).grid(row=0, column=0, padx=15)
+
+tk.Button(folder_frame, text=" Output", command=select_output).grid(row=0, column=2, padx=15)
+
+
+input_label = tk.Label(root, text="No input selected", wraplength=600, fg="gray")
+input_label.pack()
+
+output_label = tk.Label(root, text="No output selected", wraplength=600, fg="gray")
+output_label.pack(pady=(0, 10))
+
 
 tk.Button(root, text="Load Preview Image", command=load_preview).pack(pady=10)
 
 preview_label = tk.Label(root)
 preview_label.pack()
-
-
 
 
 slider_frame = tk.Frame(root)
@@ -296,21 +303,21 @@ noise_slider.set(0)
 noise_slider.pack()
 
 
-
 progress = ttk.Progressbar(root, length=400)
 progress.pack(pady=10)
 
 status_label = tk.Label(root, text="Idle")
 status_label.pack()
 
-tk.Button(root, text="Start",
+button_frame = tk.Frame(root)
+button_frame.pack(pady=15)
+
+tk.Button(button_frame, text="Start",
           command=process_folder,
-          bg="green", fg="white").pack(pady=10)
+          bg="green", fg="white", width=12).grid(row=0, column=0, padx=10)
 
-tk.Button(root, text="Quit",
+tk.Button(button_frame, text="Quit",
           command=root.destroy,
-          bg="red", fg="white").pack()
-
+          bg="red", fg="white", width=12).grid(row=0, column=1, padx=10)
 
 root.mainloop()
-
